@@ -1,0 +1,6 @@
+======== Recent changes ========
+v1.1 (23-2-6)
+- Copied pybot.py from kucoin-pybot/kucoin-pybot.py
+- Copied config.txt from kucoin-pybot/config.txt
+- Initialized changelog.txt
+- First working version
