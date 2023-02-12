@@ -1,5 +1,5 @@
 """
-Crypto Pybot v1.1 (23-2-6)
+Crypto Pybot v1.2 (23-2-12)
 https://github.com/rulibar/crypto-pybot
 """
 
@@ -14,12 +14,12 @@ import talib
 
 # instance vars
 # if exchange has no api_passphrase then leave it empty
-asset = "ETH"; base = "BTC"
-interval_mins = 30
 exchange = "kucoin"
 api_key = ""
 api_secret = ""
 api_passphrase = ""
+asset = "ETH"; base = "BTC"
+interval_mins = 30
 
 # strategy vars
 storage = dict()
@@ -85,12 +85,23 @@ class Exchange:
         self.coins = dict()
         self.tickers = dict()
         if self.name == "kucoin":
-            currencies = self.client.get_currencies()
+            currencies = self.kucoin_api_call(self.client.get_currencies)
             for i in range(len(currencies)):
                 coin_name = currencies[i]['currency']
                 coin_ticker = currencies[i]['name']
                 self.coins[coin_ticker] = coin_name
                 self.tickers[coin_name] = coin_ticker
+
+    def kucoin_api_call(self, func, **kwargs):
+        # Raise errors, but if it's the 429000 error then retry up to 10 times
+        for i in range(10):
+            try: result = func(**kwargs)
+            except Exception as exc:
+                if "429000" in str(exc) and i < 10: continue
+                else: raise exc
+            else: break
+
+        return result
 
     def get_account(self, asset, base):
         data = {"asset": [asset, 0.0], "base": [base, 0.0]}
@@ -112,7 +123,7 @@ class Exchange:
                 if acc_asset == asset: data['asset'][1] = total
                 if acc_asset == base: data['base'][1] = total
         elif self.name == "kucoin":
-            acc = self.client.get_accounts()
+            acc = self.kucoin_api_call(self.client.get_accounts)
             self.last_acc_check = int(1000 * time.time())
             for i in range(len(acc)):
                 if acc[i]['type'] != 'trade': continue
@@ -136,8 +147,8 @@ class Exchange:
             for wit in self.withdrawals_pending: start_time = min([start_time, self.withdrawals_pending[wit] - 1000])
             if start_time == self.positions_init_ts: start_time -= 24 * 60 * 60 * 1000
 
-            deposits = self.client.get_deposit_history(startTime = start_time)
-            withdrawals = self.client.get_withdraw_history(startTime = start_time)
+            deposits = self.client.get_deposit_history(startTime=start_time)
+            withdrawals = self.client.get_withdraw_history(startTime=start_time)
 
             # deal with differing formats
             if type(deposits) is dict:
@@ -204,7 +215,7 @@ class Exchange:
             data.append(d_complete)
             data.append(w_complete)
         elif self.name == "kucoin":
-            account_activity = self.client.get_account_activity()['items']
+            account_activity = self.kucoin_api_call(self.client.get_account_activity)['items']
             d_complete = list()
             w_complete = list()
 
@@ -232,8 +243,7 @@ class Exchange:
         data = list()
 
         if self.name == "binance":
-            pair = f'{asset}{base}'
-            trades = reversed(self.client.get_my_trades(symbol = pair, limit = max_num))
+            trades = reversed(self.client.get_my_trades(symbol=f'{asset}{base}', limit=max_num))
             for trade in trades:
                 if trade['time'] < self.last_acc_check_cache: continue
                 if trade['time'] > self.last_acc_check: continue
@@ -246,7 +256,7 @@ class Exchange:
                 if trade['isBuyer']: tr['side'] = 'buy'
                 data.append(tr)
         elif self.name == "kucoin":
-            account_activity = self.client.get_account_activity()['items']
+            account_activity = self.kucoin_api_call(self.client.get_account_activity)['items']
             trades = dict()
             account_activity = [item for item in account_activity if item['accountType'] == 'TRADE']
             account_activity = [item for item in account_activity if item['createdAt'] > self.last_acc_check_cache]
@@ -305,7 +315,7 @@ class Exchange:
             data['price_precision'] = pair_info[0]['tickSize']
         elif self.name == "kucoin":
             pair = f'{asset}-{base}'
-            pair_info = self.client.get_symbols()
+            pair_info = self.kucoin_api_call(self.client.get_symbols)
             pair_info = [item for item in pair_info if item['name'] == pair][0]
             data['asset_min_qty'] = pair_info['baseMinSize']
             data['base_min_qty'] = pair_info['quoteMinSize']
@@ -314,35 +324,31 @@ class Exchange:
 
         return data
 
-    def get_candles_err(self, sleep_time, attempts, err):
-        if attempts == 11:
-            sleep_time = 300
-            logger.error(f"Too many failed attempts... Setting the sleep time to {sleep_time} seconds...")
+    def get_candles_err(self, attempts, err):
+        sleep_time = 5
+        if attempts >= 11: sleep_time = 300
+        if attempts == 11: logger.error(f"Too many failed attempts... Setting the sleep time to {sleep_time} seconds...")
         elif attempts >= 100:
             logger.error(f"Too many failed attempts... Shutting down the bot.")
             exit()
-        err_msg = f"Error getting historical candle data. Retrying in {sleep_time} seconds..."
-        if err != "": err_msg += "\n'{}'".format(err)
+        err_msg = f"Error getting historical candle data. Retrying in {sleep_time} seconds...\n'{err}'"
         logger.error(err_msg)
-        return sleep_time
+        time.sleep(sleep_time)
 
     def get_historical_candles(self, asset, base, n_candles):
         data = list()
 
         if self.name == "binance":
             pair = f'{asset}{base}'
-            start_str = f"{n_candles + 5} minutes ago UTC"
+            start_str = f'{n_candles + 5} minutes ago UTC'
 
             attempts = 0
-            sleep_time = 5
             while True:
                 candles, err = list(), str()
-                try: candles = self.client.get_historical_klines(pair, "1m", start_str)
+                try: candles = self.client.get_historical_klines(pair, '1m', start_str)
                 except Exception as exc: err = exc
                 attempts += 1
-                if err != "":
-                    sleep_time = self.get_candles_err(sleep_time, attempts, err)
-                    time.sleep(sleep_time)
+                if err != "": self.get_candles_err(attempts, err)
                 else: break
             if attempts >= 5: logger.error("Failed to get historical candle data {} times.".format(attempts - 1))
             ts_data_end = int(time.time())
@@ -367,15 +373,12 @@ class Exchange:
 
             # Find the latest candles with volume
             attempts = 0
-            sleep_time = 5
             while True:
                 klines, err = list(), str()
-                try: klines = self.client.get_kline_data(symbol = pair, kline_type = "1min", start = ts_data_start)
+                try: klines = self.kucoin_api_call(self.client.get_kline_data, symbol=pair, kline_type='1min', start=ts_data_start)
                 except Exception as exc: err = exc
                 attempts += 1
-                if err != "":
-                    sleep_time = self.get_candles_err(sleep_time, attempts, err)
-                    time.sleep(sleep_time)
+                if err != "": self.get_candles_err(attempts, err)
                 else: break
             if attempts >= 5: logger.error("Failed to get historical candle data {} times.".format(attempts - 1))
             ts_data_end = int(time.time())
@@ -391,15 +394,12 @@ class Exchange:
                 ts_data_start = int(candles[-1][0]) - 1500*60
 
                 attempts = 0
-                sleep_time = 5
                 while True:
                     klines, err = list(), str()
-                    try: klines = self.client.get_kline_data(symbol = pair, kline_type = "1min", start = ts_data_start, end = candles[-1][0])
+                    try: klines = self.kucoin_api_call(self.client.get_kline_data, symbol=pair, kline_type='1min', start=ts_data_start, end=candles[-1][0])
                     except Exception as exc: err = exc
                     attempts += 1
-                    if err != "":
-                        sleep_time = self.get_candles_err(sleep_time, attempts, err)
-                        time.sleep(sleep_time)
+                    if err != "": self.get_candles_err(attempts, err)
                     else: break
                 if attempts >= 5: logger.error("Failed to get historical candle data {} times.".format(attempts - 1))
                 candles = candles + klines
@@ -426,41 +426,34 @@ class Exchange:
         data = list()
 
         if self.name == "binance":
-            pair = f'{asset}{base}'
-            open_orders = self.client.get_open_orders(symbol = pair)
+            open_orders = self.client.get_open_orders(symbol=f'{asset}{base}')
             data = [{"order_id": order["orderId"]} for order in open_orders]
         elif self.name == "kucoin":
             asset = self.coins[asset]
-            pair = f'{asset}-{base}'
-            open_orders = self.client.get_orders(symbol = pair, status = 'active')['items']
+            open_orders = self.kucoin_api_call(self.client.get_orders, symbol=f'{asset}-{base}', status='active')['items']
             data = [{"order_id": order["id"]} for order in open_orders]
 
         return data
 
     def cancel_order(self, asset, base, order_id):
         if self.name == "binance":
-            pair = f'{asset}{base}'
-            self.client.cancel_order(symbol = pair, orderId = order_id)
+            self.client.cancel_order(symbol=f'{asset}{base}', orderId=order_id)
         elif self.name == "kucoin":
-            self.client.cancel_order(order_id)
+            self.kucoin_api_call(self.client.cancel_order, order_id=order_id)
 
     def order_limit_buy(self, asset, base, amt, pt):
         if self.name == "binance":
-            pair = f'{asset}{base}'
-            self.client.order_limit_buy(symbol = pair, quantity = "{:.8f}".format(amt), price = "{:.8f}".format(pt))
+            self.client.order_limit_buy(symbol=f'{asset}{base}', quantity='{:.8f}'.format(amt), price='{:.8f}'.format(pt))
         elif self.name == "kucoin":
             asset = self.coins[asset]
-            pair = f'{asset}-{base}'
-            self.client.create_limit_order(symbol = pair, size = "{:.8f}".format(amt), price = "{:.8f}".format(pt), side = 'buy')
+            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size='{:.8f}'.format(amt), price='{:.8f}'.format(pt), side='buy')
 
     def order_limit_sell(self, asset, base, amt, pt):
         if self.name == "binance":
-            pair = f'{asset}{base}'
-            self.client.order_limit_sell(symbol = pair, quantity = "{:.8f}".format(amt), price = "{:.8f}".format(pt))
+            self.client.order_limit_sell(symbol=f'{asset}{base}', quantity='{:.8f}'.format(amt), price='{:.8f}'.format(pt))
         elif self.name == "kucoin":
             asset = self.coins[asset]
-            pair = f'{asset}-{base}'
-            self.client.create_limit_order(symbol = pair, size = "{:.8f}".format(amt), price = "{:.8f}".format(pt), side = 'sell')
+            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size='{:.8f}'.format(amt), price='{:.8f}'.format(pt), side='sell')
 
 class Portfolio:
     def __init__(self, candle, positions, funds):
@@ -974,7 +967,7 @@ class Instance:
     def init(self, p):
         # KuCoin Pybot 20/100 SXS
         self.bot_name = "KuCoin Pybot"
-        self.version = "1.1"
+        self.version = "1.2"
         logger.info("Analyzing the market...")
 
         # vars
