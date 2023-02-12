@@ -4,3 +4,9 @@ v1.1 (23-2-6)
 - Copied config.txt from kucoin-pybot/config.txt
 - Initialized changelog.txt
 - First working version
+
+v1.2 (23-2-12)
+- Added Exchange.kucoin_api_call to look for the 429000 error and retry if it happens
+- The 429000 error is on KuCoin's end, can't be avoided, and can affect all API calls
+- Move sleep_time variable inside the Exchange.get_candles_err function
+- Some minor formatting changes
