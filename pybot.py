@@ -1,5 +1,5 @@
 """
-Crypto Pybot v1.2 (23-2-12)
+Crypto Pybot v1.3 (23-2-26)
 https://github.com/rulibar/crypto-pybot
 """
 
@@ -47,8 +47,8 @@ logger = logging.getLogger()
 set_log_file()
 
 # set up trading bot
-def fix_dec(float_in):
-    float_out = "{:.8f}".format(float_in)
+def fix_dec(float_in, max_precision=8):
+    float_out = f'{float_in:.{max_precision}f}'
     while float_out[-1] == "0": float_out = float_out[:-1]
     if float_out[-1] == ".": float_out = float_out[:-1]
     return float_out
@@ -76,6 +76,11 @@ class Exchange:
         self.positions_init_ts = 0
         self.last_acc_check = 0
         self.last_acc_check_cache = 0
+
+        # Pair vars
+        self.asset = str()
+        self.base = str()
+        self.amt_dec = 8; self.pt_dec = 8
 
         # Binance vars
         self.deposits_pending = dict()
@@ -106,6 +111,8 @@ class Exchange:
     def get_account(self, asset, base):
         data = {"asset": [asset, 0.0], "base": [base, 0.0]}
 
+        self.asset = asset
+        self.base = base
         self.last_acc_check_cache = int(self.last_acc_check)
         if self.positions_init_ts == 0:
             self.positions_init_ts = int(1000 * time.time())
@@ -215,16 +222,14 @@ class Exchange:
             data.append(d_complete)
             data.append(w_complete)
         elif self.name == "kucoin":
-            account_activity = self.kucoin_api_call(self.client.get_account_activity)['items']
+            kwargs = {'biz_type': 'TRANSFER', 'start': self.last_acc_check_cache, 'end': self.last_acc_check, 'limit': 500}
+            account_activity = self.kucoin_api_call(self.client.get_account_activity, **kwargs)['items']
             d_complete = list()
             w_complete = list()
+            account_activity = [item for item in account_activity if item['accountType'] == 'TRADE']
 
             for i in range(len(account_activity)):
                 item = account_activity[i]
-                if item['accountType'] != 'TRADE': continue
-                if item['bizType'] != 'Transfer': continue
-                if item['createdAt'] < self.last_acc_check_cache: continue
-                if item['createdAt'] > self.last_acc_check: continue
                 item_asset = self.tickers[item['currency']]
                 if item_asset not in {asset, base}: continue
                 item_obj = dict()
@@ -256,15 +261,14 @@ class Exchange:
                 if trade['isBuyer']: tr['side'] = 'buy'
                 data.append(tr)
         elif self.name == "kucoin":
-            account_activity = self.kucoin_api_call(self.client.get_account_activity)['items']
+            kwargs = {'biz_type': 'TRADE_EXCHANGE', 'start': self.last_acc_check_cache, 'end': self.last_acc_check, 'limit': 500}
+            account_activity = self.kucoin_api_call(self.client.get_account_activity, **kwargs)['items']
             trades = dict()
             account_activity = [item for item in account_activity if item['accountType'] == 'TRADE']
-            account_activity = [item for item in account_activity if item['createdAt'] > self.last_acc_check_cache]
-            account_activity = [item for item in account_activity if item['createdAt'] < self.last_acc_check]
 
             for i in range(len(account_activity)):
+                # Find potentially relevant trades and put them in the desired format
                 item = account_activity[i]
-                if item['bizType'] != 'Exchange': continue
                 item_asset = self.tickers[item['currency']]
                 if item_asset not in {asset, base}: continue
                 context = json.loads(item['context'])
@@ -285,6 +289,7 @@ class Exchange:
                     trades[id]['amt_asset'] += float(item['amount'])
                     if item['direction'] == 'out': trades[id]['side'] = 'sell'
             for i in range(len(account_activity)):
+                # Update the fees for each trade if the user was using KCS Pay Fees
                 item = account_activity[i]
                 if item['bizType'] != 'KCS Pay Fees': continue
                 item_asset = self.tickers[item['currency']]
@@ -294,11 +299,12 @@ class Exchange:
                     trades[id]['amt_fee'] = float(item['amount'])
                     trades[id]['fee_currency'] = item_asset
             for id in trades:
+                # Disregard irrelevant trades and express floats as strings
                 if trades[id]['amt_asset'] == 0: continue
                 if trades[id]['amt_base'] == 0: continue
                 for key in trades[id]:
                     if key in {'fee_currency', 'side'}: continue
-                    trades[id][key] = f"{trades[id][key]:.8f}"
+                    trades[id][key] = fix_dec(trades[id][key])
                 data.append(trades[id])
 
         return data
@@ -321,6 +327,20 @@ class Exchange:
             data['base_min_qty'] = pair_info['quoteMinSize']
             data['asset_precision'] = pair_info['baseIncrement']
             data['price_precision'] = pair_info['priceIncrement']
+
+        amt_dec = len(data['asset_precision'].split('.')[1])
+        for char in reversed(data['asset_precision']):
+            if char == "0": amt_dec -= 1
+            else: break
+        data['amt_dec'] = f'{amt_dec}'
+        self.amt_dec = int(amt_dec)
+
+        pt_dec = len(data['price_precision'].split('.')[1])
+        for char in reversed(data['price_precision']):
+            if char == "0": pt_dec -= 1
+            else: break
+        data['pt_dec'] = f'{pt_dec}'
+        self.pt_dec = int(pt_dec)
 
         return data
 
@@ -357,10 +377,10 @@ class Exchange:
                 candle = candles[i]
                 data.append({
                     "ts_start": int(candle[0]),
-                    "open": round(float(candle[1]), 8),
-                    "high": round(float(candle[2]), 8),
-                    "low": round(float(candle[3]), 8),
-                    "close": round(float(candle[4]), 8),
+                    "open": round(float(candle[1]), self.pt_dec),
+                    "high": round(float(candle[2]), self.pt_dec),
+                    "low": round(float(candle[3]), self.pt_dec),
+                    "close": round(float(candle[4]), self.pt_dec),
                     "volume": round(float(candle[7]), 8),
                     "ts_end": int(candle[6])})
 
@@ -410,10 +430,10 @@ class Exchange:
                 candle = candles[i]
                 data.append({
                     "ts_start": int(candle[0]) * 1000,
-                    "open": round(float(candle[1]), 8),
-                    "high": round(float(candle[3]), 8),
-                    "low": round(float(candle[4]), 8),
-                    "close": round(float(candle[2]), 8),
+                    "open": round(float(candle[1]), self.pt_dec),
+                    "high": round(float(candle[3]), self.pt_dec),
+                    "low": round(float(candle[4]), self.pt_dec),
+                    "close": round(float(candle[2]), self.pt_dec),
                     "volume": round(float(candle[6]), 8),
                     "ts_end": (int(candle[0]) + 60) * 1000 - 1})
 
@@ -443,17 +463,17 @@ class Exchange:
 
     def order_limit_buy(self, asset, base, amt, pt):
         if self.name == "binance":
-            self.client.order_limit_buy(symbol=f'{asset}{base}', quantity='{:.8f}'.format(amt), price='{:.8f}'.format(pt))
+            self.client.order_limit_buy(symbol=f'{asset}{base}', quantity=f'{amt}', price=f'{pt}')
         elif self.name == "kucoin":
             asset = self.coins[asset]
-            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size='{:.8f}'.format(amt), price='{:.8f}'.format(pt), side='buy')
+            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size=f'{amt}', price=f'{pt}', side='buy')
 
     def order_limit_sell(self, asset, base, amt, pt):
         if self.name == "binance":
-            self.client.order_limit_sell(symbol=f'{asset}{base}', quantity='{:.8f}'.format(amt), price='{:.8f}'.format(pt))
+            self.client.order_limit_sell(symbol=f'{asset}{base}', quantity=f'{amt}', price=f'{pt}')
         elif self.name == "kucoin":
             asset = self.coins[asset]
-            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size='{:.8f}'.format(amt), price='{:.8f}'.format(pt), side='sell')
+            self.kucoin_api_call(self.client.create_limit_order, symbol=f'{asset}-{base}', size=f'{amt}', price=f'{pt}', side='sell')
 
 class Portfolio:
     def __init__(self, candle, positions, funds):
@@ -474,10 +494,11 @@ class Instance:
         self.next_log = 0
         self.ticks = 0; self.days = 0; self.trades = 0
         self.exchange = exchange
-        self.base = str(base)
         self.asset = str(asset)
+        self.base = str(base)
         self.pair = self.asset + self.base
         self.interval = int(interval_mins)
+        self.amt_dec = 8; self.pt_dec = 8; self.min_order = 0
         logger.info("New trader instance started on {} {} {}m.".format(self.exchange.title(), self.pair, self.interval))
         self.get_params()
 
@@ -529,7 +550,7 @@ class Instance:
 
     def limit_buy(self, amt, pt):
         try:
-            logger.warning("Trying to buy {} {} for {} {}. (price: {})".format(fix_dec(amt), self.asset, fix_dec(round(amt * pt, self.pt_dec)), self.base, fix_dec(pt)))
+            logger.warning("Trying to buy {} {} for {} {}. (price: {})".format(fix_dec(amt, self.amt_dec), self.asset, fix_dec(amt*pt), self.base, fix_dec(pt, self.pt_dec)))
             self.last_order = {"type": "buy", "amt": amt, "pt": pt}
             client.order_limit_buy(self.asset, self.base, amt, pt)
         except Exception as err:
@@ -537,7 +558,7 @@ class Instance:
 
     def limit_sell(self, amt, pt):
         try:
-            logger.warning("Trying to sell {} {} for {} {}. (price: {})".format(fix_dec(amt), self.asset, fix_dec(round(amt * pt, self.pt_dec)), self.base, fix_dec(pt)))
+            logger.warning("Trying to sell {} {} for {} {}. (price: {})".format(fix_dec(amt, self.amt_dec), self.asset, fix_dec(amt*pt), self.base, fix_dec(pt, self.pt_dec)))
             self.last_order = {"type": "sell", "amt": amt, "pt": pt}
             client.order_limit_sell(self.asset, self.base, amt, pt)
         except Exception as err:
@@ -563,7 +584,8 @@ class Instance:
             pt = round(pt, self.pt_dec)
             if rbuy > 0: amt = order_size / pt
             else: amt = order_size / p.price
-            amt = round(0.995 * amt * 10**self.amt_dec - 2) / 10**self.amt_dec
+            amt = (0.995 * amt * 10**self.amt_dec - 2) / 10**self.amt_dec
+            amt = round(amt, self.amt_dec)
             if rbuy > 0: self.limit_buy(amt, pt)
             if rbuy < 0: self.limit_sell(amt, pt)
         if rbuy == 0: order_size = 0
@@ -579,42 +601,29 @@ class Instance:
         except Exception as err:
             logger.error("Error closing open orders.\n'{}'".format(err))
 
-    def update_vars(self):
+    def update_vars(self, p):
         # Get preliminary vars
-        self.ticks += 1
-        self.days = (self.ticks - 1) * self.interval / (60 * 24)
-
         try: pair_info = client.get_pair_info(self.asset, self.base)
         except Exception as err:
             logger.error("Error getting pair info.\n'{}'".format(err))
             return
 
+        self.amt_dec = int(pair_info['amt_dec'])
+        self.pt_dec = int(pair_info['pt_dec'])
+
         min_order = float(pair_info['asset_min_qty']) * self.candles[-1]['close']
-        self.min_order = 3 * max(min_order, float(pair_info['base_min_qty']))
-
-        amt_dec = len(pair_info['asset_precision'].split('.')[1])
-        for char in reversed(pair_info['asset_precision']):
-            if char == "0": amt_dec -= 1
-            else: break
-        if amt_dec > 8:
-            logger.error(f"Error: Asset precision is too high. Changing amt_dec from {amt_dec} to 8.")
-            amt_dec = 8
-        self.amt_dec = amt_dec
-
-        pt_dec = len(pair_info['price_precision'].split('.')[1])
-        for char in reversed(pair_info['price_precision']):
-            if char == "0": pt_dec -= 1
-            else: break
-        if pt_dec > 8:
-            logger.error(f"Error: Price precision is too high. Changing pt_dec from {pt_dec} to 8.")
-            pt_dec = 8
-        self.pt_dec = pt_dec
+        min_order = 3 * max(min_order, float(pair_info['base_min_qty']))
+        self.min_order = max(min_order, round(0.05*p.funds, self.amt_dec))
 
     def get_params(self):
         # import and process params from config.txt
         params = dict()
         with open("config.txt") as cfg:
-            par = [l.split()[0] for l in cfg.read().split("\n")[2:-1]]
+            par = cfg.readlines()
+            par = [line.split('#')[0] for line in par]
+            par = [line.replace(' ', '') for line in par]
+            par = [line.replace('\n', '') for line in par]
+            par = [line for line in par if line != '']
             for p in par:
                 p = p.split("=")
                 if len(p) != 2: continue
@@ -829,9 +838,7 @@ class Instance:
 
         # process trades
         if len(trades) > 0:
-            #str_out = "{} new trade(s) found.".format(len(trades))
             for trade in trades:
-                #str_out += "\n    {}".format(trade)
                 amt_asset = float(trade['amt_asset'])
                 amt_base = float(trade['amt_base'])
                 price = amt_base / amt_asset
@@ -887,10 +894,11 @@ class Instance:
 
         # process unknown changes
         if self.params['log_dws'] == "yes":
-            if diffasset_unkn > 0: logger.info("{} {} has become available.".format(fix_dec(diffasset_unkn), self.asset))
-            elif diffasset_unkn < 0: logger.info("{} {} has become unavailable.".format(fix_dec(-diffasset_unkn), self.asset))
-            if diffbase_unkn > 0: logger.info("{} {} has become available.".format(fix_dec(diffbase_unkn), self.base))
-            elif diffbase_unkn < 0: logger.info("{} {} has become unavailable.".format(fix_dec(-diffbase_unkn), self.base))
+            diff_th = 0.00000002
+            if diffasset_unkn > diff_th: logger.info("{} {} has become available.".format(fix_dec(diffasset_unkn), self.asset))
+            elif diffasset_unkn < -diff_th: logger.info("{} {} has become unavailable.".format(fix_dec(-diffasset_unkn), self.asset))
+            if diffbase_unkn > diff_th: logger.info("{} {} has become available.".format(fix_dec(diffbase_unkn), self.base))
+            elif diffbase_unkn < -diff_th: logger.info("{} {} has become unavailable.".format(fix_dec(-diffbase_unkn), self.base))
 
         # set position and average price
         if apc == 0: apc = p.price
@@ -941,7 +949,7 @@ class Instance:
         header_2 = "{} {} {} {}m {}".format(3 * hr, self.exchange.title(), self.pair, self.interval, 9 * hr)[:50]
         trades = "{} trades ({} per day)".format(int(self.trades), round(tpd, 2))
         currency = "{} {}".format(fix_dec(p.base), self.base)
-        price = "{} {}".format(fix_dec(p.price), self.base)
+        price = "{} {}".format(fix_dec(p.price, self.pt_dec), self.base)
         assets = "{} {}".format(fix_dec(p.asset), self.asset)
         assetvalue = "{} {}".format(fix_dec(p.positionValue), self.base)
         accountvalue = "{} {}".format(fix_dec(p.size), self.base)
@@ -966,8 +974,8 @@ class Instance:
 
     def init(self, p):
         # KuCoin Pybot 20/100 SXS
-        self.bot_name = "KuCoin Pybot"
-        self.version = "1.2"
+        self.bot_name = "Crypto Pybot"
+        self.version = "1.3"
         logger.info("Analyzing the market...")
 
         # vars
@@ -989,12 +997,13 @@ class Instance:
         close_data = numpy.array([c['close'] for c in self.candles])
 
         # get sigs
+        pt_dec = self.pt_dec
         SMAs = dict()
         class SMA:
             def __init__(self, ma_len):
                 self.ma_len = ma_len
                 self.arr = talib.SMA(close_data, timeperiod = ma_len)
-                self.price = self.arr[-1]
+                self.price = round(self.arr[-1], pt_dec)
                 SMAs[ma_len] = self.price
 
         class SXS:
@@ -1033,15 +1042,16 @@ class Instance:
         # New tick?
         if n_new_candles > 0:
             # Preliminary setup
+            self.ticks += 1
+            self.days = (self.ticks - 1) * self.interval / (60 * 24)
             set_log_file()
-            self.close_orders()
-            self.update_vars()
             self.get_params()
 
             self.positions_last = {key: value[:] for key, value in self.positions.items()}
             self.positions = self.get_positions()
+            self.close_orders()
             p = Portfolio(self.candles[-1], self.positions, self.params['funds'])
-            self.min_order = max(self.min_order, round(0.05*p.funds, 8))
+            self.update_vars(p)
             self.process_dwts(p)
             self.get_performance(p)
 
@@ -1058,6 +1068,8 @@ class Instance:
 api = [api_key, api_secret, api_passphrase]
 client = Exchange(exchange, api)
 ins = Instance(asset, base, interval_mins)
+
 while True:
     ins.ping()
-    time.sleep(0.5)
+    sleep_time = 0.5
+    time.sleep(sleep_time)
